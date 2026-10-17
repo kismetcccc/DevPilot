@@ -220,6 +220,3 @@ flowchart TD
 - **会话续航**：保存 Session、笔记及运行事件，支持上下文压缩。
 - **扩展能力**：通过 Skills、子 Agent 和 MCP 接入可复用能力与外部工具。
 
-## 许可证
-
-DevPilot 使用 MIT 许可证。继承代码的版权归属与许可条款见 [LICENSE](LICENSE)。
