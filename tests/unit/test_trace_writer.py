@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -28,7 +29,7 @@ async def test_emit_writes_record_to_file(tmp_path: Path) -> None:
     writer.emit(_record())
     await writer.stop()
 
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     parsed = json.loads(lines[0])
     assert parsed["direction"] == "CORE"
@@ -48,7 +49,7 @@ async def test_emit_multiple_records_in_order(tmp_path: Path) -> None:
     writer.emit(_record("LLM→CORE", "api_response"))
     await writer.stop()
 
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
     assert json.loads(lines[0])["direction"] == "CLIENT→CORE"
     assert json.loads(lines[1])["direction"] == "CORE"
@@ -68,7 +69,7 @@ async def test_emit_is_nonblocking(tmp_path: Path) -> None:
         writer.emit(_record())
     await writer.stop()
 
-    assert len(path.read_text().splitlines()) == 10
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 10
 
 
 # 功能：验证 TraceWriter 自动创建不存在的父目录
@@ -82,7 +83,7 @@ async def test_start_creates_parent_dirs(tmp_path: Path) -> None:
     await writer.stop()
 
     assert path.exists()
-    assert len(path.read_text().splitlines()) == 1
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
 
 
 # 功能：验证 stop 后再次 start 可以追加写入（文件已存在时）
@@ -101,4 +102,25 @@ async def test_append_mode_on_restart(tmp_path: Path) -> None:
     writer2.emit(_record())
     await writer2.stop()
 
-    assert len(path.read_text().splitlines()) == 2
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+# 功能：验证中文及表情日志始终以 UTF-8 写入，不依赖 Windows 系统区域设置
+# 设计：使用默认中文编码也不能表示的表情，直接检查文件字节以捕获隐式编码
+async def test_trace_always_uses_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    writer = TraceWriter(path)
+    await writer.start()
+    writer.emit(_record("CLIENT→CORE").model_copy(update={"data": {"text": "用户画像🚀"}}))
+    await asyncio.wait_for(writer.stop(), timeout=1)
+    assert "用户画像🚀".encode() in path.read_bytes()
+
+
+# 功能：验证后台日志打开失败时 stop 能及时抛出原始异常而不会永久等待
+# 设计：将目录当作目标文件触发真实 I/O 错误，超时保护防止测试本身挂起
+async def test_trace_failure_does_not_deadlock_shutdown(tmp_path: Path) -> None:
+    writer = TraceWriter(tmp_path)
+    await writer.start()
+    writer.emit(_record())
+    with pytest.raises(OSError):
+        await asyncio.wait_for(writer.stop(), timeout=1)

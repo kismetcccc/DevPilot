@@ -34,7 +34,7 @@ def cmd_trace(
         print(f"trace file not found: {trace_path}", file=sys.stderr)
         sys.exit(1)
 
-    with open(trace_path) as f:
+    with open(trace_path, encoding="utf-8") as f:
         for line in f:
             _process_line(
                 line.strip(),
@@ -45,7 +45,7 @@ def cmd_trace(
             )
 
     if follow:
-        with open(trace_path) as f:
+        with open(trace_path, encoding="utf-8") as f:
             f.seek(0, 2)
             while True:
                 line = f.readline()

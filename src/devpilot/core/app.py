@@ -220,7 +220,7 @@ class CoreApp:
             return 0
 
         count = 0
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if not line:
                 continue
             try:
