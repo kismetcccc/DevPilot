@@ -39,7 +39,7 @@ jobs:
       DEVPILOT_TEST_POSTGRES_DSN: postgresql://devpilot:devpilot_ci@127.0.0.1:5432/devpilot
       OPENAI_API_KEY: local-test-key
       OPENAI_BASE_URL: http://127.0.0.1:9
-      DEVPILOT_SESSIONS_DIR: ${{ runner.temp }}/devpilot-sessions
+      DEVPILOT_SESSIONS_DIR: /tmp/devpilot-ci-sessions
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
