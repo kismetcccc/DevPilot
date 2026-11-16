@@ -581,6 +581,167 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### SessionResumeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.resume",
+      "default": "session.resume",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionResumeCommand",
+  "type": "object"
+}
+```
+
+### SessionResumeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `status` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "status": {
+      "enum": [
+        "active",
+        "waiting_for_input",
+        "closed"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "SessionResumeResult",
+  "type": "object"
+}
+```
+
+### MemoryManageCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `action` | `string` | no |
+| `key` | `string` | no |
+| `value` | `string` | no |
+| `candidate_id` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "memory.manage",
+      "default": "memory.manage",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "action": {
+      "default": "list",
+      "enum": [
+        "list",
+        "pending",
+        "history",
+        "set",
+        "confirm",
+        "forget",
+        "lock",
+        "unlock",
+        "short",
+        "clear"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "key": {
+      "default": "",
+      "maxLength": 80,
+      "title": "Key",
+      "type": "string"
+    },
+    "value": {
+      "default": "",
+      "maxLength": 1000,
+      "title": "Value",
+      "type": "string"
+    },
+    "candidate_id": {
+      "default": "",
+      "maxLength": 36,
+      "title": "Candidate Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "MemoryManageCommand",
+  "type": "object"
+}
+```
+
+### MemoryManageResult
+
+| Field | Type | Required |
+|---|---|---|
+| `enabled` | `boolean` | yes |
+| `action` | `string` | yes |
+| `items` | `array` | no |
+
+```json
+{
+  "properties": {
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "action": {
+      "title": "Action",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Items",
+      "type": "array"
+    }
+  },
+  "required": [
+    "enabled",
+    "action"
+  ],
+  "title": "MemoryManageResult",
+  "type": "object"
+}
+```
+
 ## Server Push
 
 Events pushed from daemon to subscribed clients over the same TCP connection.

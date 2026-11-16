@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator
+from pydantic import BaseModel, Discriminator, Field
 
 from devpilot.core.session.model import SessionMode, SessionStatus
 
@@ -78,6 +78,15 @@ class SessionCloseResult(BaseModel):
     status: SessionStatus
 
 
+class SessionResumeCommand(BaseModel):
+    type: Literal["session.resume"] = "session.resume"
+    session_id: str
+
+
+class SessionResumeResult(BaseModel):
+    status: SessionStatus
+
+
 class PermissionRespondCommand(BaseModel):
     type: Literal["permission.respond"] = "permission.respond"
     tool_use_id: str
@@ -100,6 +109,32 @@ class SessionCompactResult(BaseModel):
     saved_tokens: int
 
 
+class MemoryManageCommand(BaseModel):
+    type: Literal["memory.manage"] = "memory.manage"
+    session_id: str
+    action: Literal[
+        "list",
+        "pending",
+        "history",
+        "set",
+        "confirm",
+        "forget",
+        "lock",
+        "unlock",
+        "short",
+        "clear",
+    ] = "list"
+    key: str = Field(default="", max_length=80)
+    value: str = Field(default="", max_length=1000)
+    candidate_id: str = Field(default="", max_length=36)
+
+
+class MemoryManageResult(BaseModel):
+    enabled: bool
+    action: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -109,7 +144,9 @@ Command = Annotated[
     | SessionSendMessageCommand
     | SessionGetHistoryCommand
     | SessionCloseCommand
+    | SessionResumeCommand
     | PermissionRespondCommand
-    | SessionCompactCommand,
+    | SessionCompactCommand
+    | MemoryManageCommand,
     Discriminator("type"),
 ]

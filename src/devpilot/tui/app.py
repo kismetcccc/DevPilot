@@ -6,8 +6,6 @@ import logging
 import time
 from typing import Any
 
-log = logging.getLogger(__name__)
-
 from rich.markdown import Markdown
 from textual import events
 from textual.app import App, ComposeResult
@@ -21,6 +19,8 @@ from textual.widgets import Label, Static, TextArea
 from devpilot.core.config import DevPilotConfig
 from devpilot.core.skills.loader import SkillLoader
 from devpilot.core.transport.socket_client import IpcError, SocketClient
+
+log = logging.getLogger(__name__)
 
 
 def _preview(s: str, n: int) -> str:
@@ -204,7 +204,11 @@ class PermissionSelect(Static):
 
     # 焦点到达时记录，用于确认 focus() 是否真正生效
     def on_focus(self, event: events.Focus) -> None:
-        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r", self.has_focus, self.app.focused)
+        log.debug(
+            "PermissionSelect.on_focus  has_focus=%s  app.focused=%r",
+            self.has_focus,
+            self.app.focused,
+        )
 
     # 焦点离开时记录，用于追踪是否被其他控件抢走焦点
     def on_blur(self, event: events.Blur) -> None:
@@ -529,7 +533,11 @@ class DevPilotTuiApp(App[None]):
 
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
     def _build_slash_items(self) -> list[tuple[str, str]]:
-        items: list[tuple[str, str]] = [("compact", "compress context window")]
+        items: list[tuple[str, str]] = [
+            ("compact", "compress context window"),
+            ("memory", "查看和管理用户画像、待确认信息与短期记忆"),
+            ("resume", "恢复已有会话：/resume sess-..."),
+        ]
         try:
             loader = SkillLoader()
             for skill in loader.list_all_skills():
@@ -611,6 +619,16 @@ class DevPilotTuiApp(App[None]):
         content = event.value.strip()
         if not content:
             return
+        if content == "/memory" or content.startswith("/memory "):
+            event.text_area.text = ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_memory(content), name="memory", exclusive=True)
+            return
+        if content.startswith("/resume "):
+            event.text_area.text = ""
+            if not self._busy and self._client is not None:
+                self.run_worker(self._do_resume(content.split(maxsplit=1)[1]), name="resume")
+            return
         # 检测 /compact 指令
         if content == "/compact":
             event.text_area.text = ""
@@ -629,6 +647,62 @@ class DevPilotTuiApp(App[None]):
         self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
         self._update_header("running")
         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+
+    # 恢复已有会话并显示会话 ID，支持 Core 重启后继续使用短期记忆
+    async def _do_resume(self, session_id: str) -> None:
+        if self._client is None:
+            return
+        try:
+            await self._client.send_command("session.resume", {"session_id": session_id})
+            self._session_id = session_id
+            self._append(Static(f"已恢复会话 {session_id}", markup=False, classes="log-line"))
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._append(Static(f"恢复失败：{exc}", markup=False, classes="log-line"))
+
+    # 解析记忆管理命令并将来源、版本和候选 ID 以纯文本显示
+    async def _do_memory(self, content: str) -> None:
+        if self._client is None or self._session_id is None:
+            return
+        parts = content.split(maxsplit=3)
+        action = parts[1] if len(parts) > 1 else "list"
+        required = {"set": 4, "confirm": 3, "history": 3,
+                    "forget": 3, "lock": 3, "unlock": 3}
+        known = {"list", "pending", "history", "set", "confirm", "forget",
+                 "lock", "unlock", "short", "clear"}
+        if action not in known or len(parts) < required.get(action, 1):
+            self._append(Static(
+                "/memory [list|pending|short|clear]\n"
+                "/memory set <字段> <值>  ·  /memory confirm <候选ID>\n"
+                "/memory [history|forget|lock|unlock] <字段>", markup=False, classes="log-line",
+            ))
+            return
+        params = {"session_id": self._session_id, "action": action}
+        if len(parts) > 2:
+            params["candidate_id" if action == "confirm" else "key"] = parts[2]
+        if action == "set":
+            params["value"] = parts[3]
+        try:
+            result = await self._client.send_command("memory.manage", params)
+            if not result.get("enabled"):
+                text = "PostgreSQL 记忆未启用，请配置 DEVPILOT_MEMORY_DSN 后重启 Core。"
+            else:
+                lines = [f"记忆 · {action} · 会话 {self._session_id}"]
+                for row in result.get("items", []):
+                    field = row.get("key", "")
+                    value = row.get("value", row.get("content", ""))
+                    lines.append(f"{field}: {value}")
+                    metadata = {key: row[key] for key in (
+                        "id", "version", "status", "locked", "source_session",
+                        "quote", "expires_at", "action",
+                    ) if key in row}
+                    lines.append("  " + json.dumps(metadata, ensure_ascii=False, default=str))
+                if not result.get("items"):
+                    lines.append("操作完成，当前列表为空。")
+                lines.append("输入 /memory help 查看管理命令。")
+                text = "\n".join(lines)
+            self._append(Static(text, markup=False, classes="log-line"))
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._append(Static(f"记忆操作失败：{exc}", markup=False, classes="log-line"))
 
     # 在 worker 中执行手动压缩命令，完成后显示结果横幅
     async def _do_compact(self) -> None:
@@ -1019,10 +1093,13 @@ class DevPilotTuiApp(App[None]):
             self._append(perm_block)
             select = PermissionSelect(tool_use_id)
             self._mount_permission_select(select)
-            log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
+            log.debug(
+                "PermissionSelect mounted before #prompt  pending=%d",
+                len(self._pending_permission_blocks),
+            )
 
         elif t == "permission.denied":
-            # 处理超时或断连等非用户交互触发的 deny（用户主动 deny 已由 on_permission_select_decided 处理）
+            # 核心确认审批超时；用户主动拒绝已在本地处理
             tool_use_id = str(event.get("tool_use_id", ""))
             decision = str(event.get("decision", "denied"))
             if tool_use_id in self._pending_permission_blocks:

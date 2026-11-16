@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,10 +30,12 @@ async def test_bash_nonzero_exit_is_error() -> None:
 
 
 # 功能：验证命令超时后 is_error=True，error_type 为 "timeout"
-# 设计：timeout=1s 搭配 sleep 2 必然超时；验证 error_type 而非 content，避免超时消息格式耦合
+# 设计：用 Python sleep 跨平台触发超时，避免依赖 Windows 不提供的 sleep 命令
 @pytest.mark.asyncio
 async def test_bash_timeout() -> None:
-    result = await BashTool().invoke({"command": "sleep 5", "timeout": 1})
+    result = await BashTool().invoke({
+        "command": f'"{sys.executable}" -c "import time; time.sleep(2)"', "timeout": 1,
+    })
     assert result.is_error
     assert result.error_type == "timeout"
 

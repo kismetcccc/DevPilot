@@ -12,6 +12,8 @@ from devpilot.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    MemoryManageCommand,
+    MemoryManageResult,
     PingCommand,
     PongResult,
     SessionCloseCommand,
@@ -20,6 +22,8 @@ from devpilot.core.bus.commands import (
     SessionCreateResult,
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
+    SessionResumeCommand,
+    SessionResumeResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
 )
@@ -187,6 +191,14 @@ def generate() -> str:
         _model_section("SessionCloseCommand", SessionCloseCommand),
         "\n",
         _model_section("SessionCloseResult", SessionCloseResult),
+        "\n",
+        _model_section("SessionResumeCommand", SessionResumeCommand),
+        "\n",
+        _model_section("SessionResumeResult", SessionResumeResult),
+        "\n",
+        _model_section("MemoryManageCommand", MemoryManageCommand),
+        "\n",
+        _model_section("MemoryManageResult", MemoryManageResult),
         "\n## Server Push\n\n",
         "Events pushed from daemon to subscribed clients over the same TCP connection.\n\n",
         _model_section("EventPushEnvelope", EventPushEnvelope, event_push_example),
@@ -279,13 +291,13 @@ def main() -> None:
         if not output_path.exists():
             print(f"ERROR: {output_path} not found — run: make docs", file=sys.stderr)
             sys.exit(1)
-        if output_path.read_text() != content:
+        if output_path.read_text(encoding="utf-8") != content:
             print(f"ERROR: {output_path} out of sync with code — run: make docs", file=sys.stderr)
             sys.exit(1)
         print(f"OK: {output_path} is up to date.")
     else:
         output_path = Path(args.output)
-        output_path.write_text(content)
+        output_path.write_text(content, encoding="utf-8")
         print(f"Generated {output_path}")
 
 

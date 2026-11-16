@@ -16,6 +16,7 @@ dependencies = [
     "anthropic>=0.25",     # Anthropic LLM SDK（流式 + prompt caching）
     "textual>=0.75",       # 终端 UI 框架（devpilot-tui）
     "httpx[socks]>=0.28.1",
+    "psycopg[binary,pool]>=3.2,<4",
 ]
 
 # 安装后可在 PATH 中执行的入口：`devpilot` / `devpilot-core` / `devpilot-tui`

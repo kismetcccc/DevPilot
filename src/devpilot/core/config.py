@@ -51,7 +51,7 @@ class PermissionConfig:
 
 @dataclass
 class CompactionConfig:
-    auto_threshold: float = 0.0    # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
+    auto_threshold: float = 0.0  # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
     tool_result_limit: int = 8_000  # tool_result 截断触发字符数
     tool_result_keep: int = 4_000   # 截断后保留的前缀字符数
 
@@ -68,6 +68,16 @@ class McpServerConfig:
 
 
 @dataclass
+class MemoryConfig:
+    dsn: str = field(default="", repr=False)
+    user_id: str = "default"
+    short_term_ttl_hours: int = 24
+    context_max_chars: int = 6000
+    pool_max_size: int = 4
+    auto_extract: bool = True
+
+
+@dataclass
 class McpConfig:
     servers: list[McpServerConfig] = field(default_factory=list)
 
@@ -76,6 +86,7 @@ class McpConfig:
 class DevPilotConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
+    sessions_dir: str = "~/.devpilot/sessions"
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
@@ -83,6 +94,7 @@ class DevPilotConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -117,9 +129,14 @@ def get_config() -> DevPilotConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: DevPilotConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp"}
+    unknown = set(data.keys()) - {
+        "core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "memory",
+    }
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
+
+    if "memory" in data:
+        _apply_memory(config.memory, data["memory"])
 
     if "core" in data:
         core = data["core"]
@@ -224,7 +241,11 @@ def _apply_toml(config: DevPilotConfig, data: dict[str, Any]) -> None:
         comp = data["compaction"]
         if not isinstance(comp, dict):
             raise SystemExit("Config error: [compaction] must be a table")
-        unknown_comp: set[str] = set(comp.keys()) - {"auto_threshold", "tool_result_limit", "tool_result_keep"}
+        unknown_comp: set[str] = set(comp.keys()) - {
+            "auto_threshold",
+            "tool_result_limit",
+            "tool_result_keep",
+        }
         if unknown_comp:
             raise SystemExit(f"Unknown [compaction] keys: {', '.join(sorted(unknown_comp))}")
         if "auto_threshold" in comp:
@@ -235,12 +256,16 @@ def _apply_toml(config: DevPilotConfig, data: dict[str, Any]) -> None:
         if "tool_result_limit" in comp:
             val = comp["tool_result_limit"]
             if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: compaction.tool_result_limit must be a positive integer")
+                raise SystemExit(
+                    "Config error: compaction.tool_result_limit must be a positive integer"
+                )
             config.compaction.tool_result_limit = val
         if "tool_result_keep" in comp:
             val = comp["tool_result_keep"]
             if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: compaction.tool_result_keep must be a positive integer")
+                raise SystemExit(
+                    "Config error: compaction.tool_result_keep must be a positive integer"
+                )
             config.compaction.tool_result_keep = val
 
     if "mcp" in data:
@@ -261,7 +286,9 @@ def _apply_toml(config: DevPilotConfig, data: dict[str, Any]) -> None:
                 raise SystemExit(f"Config error: mcp.servers[{i}].name must be a non-empty string")
             transport = srv.get("transport", "stdio")
             if transport not in ("stdio", "tcp"):
-                raise SystemExit(f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'")
+                raise SystemExit(
+                    f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'"
+                )
             s = McpServerConfig(name=name, transport=transport)
             if "command" in srv:
                 val = srv["command"]
@@ -293,6 +320,31 @@ def _apply_toml(config: DevPilotConfig, data: dict[str, Any]) -> None:
 
 # 用 DEVPILOT_* 环境变量覆盖 config 中对应字段（若变量已设置）
 def _apply_env(config: DevPilotConfig) -> None:
+    config.sessions_dir = os.environ.get("DEVPILOT_SESSIONS_DIR", config.sessions_dir)
+    memory_env = {
+        "dsn": "DEVPILOT_MEMORY_DSN", "user_id": "DEVPILOT_MEMORY_USER_ID",
+        "short_term_ttl_hours": "DEVPILOT_MEMORY_TTL_HOURS",
+        "context_max_chars": "DEVPILOT_MEMORY_CONTEXT_MAX_CHARS",
+        "pool_max_size": "DEVPILOT_MEMORY_POOL_MAX_SIZE",
+        "auto_extract": "DEVPILOT_MEMORY_AUTO_EXTRACT",
+    }
+    values: dict[str, Any] = {}
+    for key, env_name in memory_env.items():
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        if key in ("short_term_ttl_hours", "context_max_chars", "pool_max_size"):
+            try:
+                values[key] = int(raw)
+            except ValueError:
+                raise SystemExit(f"Config error: {env_name} must be an integer") from None
+        elif key == "auto_extract":
+            if raw.lower() not in ("true", "false", "1", "0"):
+                raise SystemExit(f"Config error: {env_name} must be true/false or 1/0")
+            values[key] = raw.lower() in ("true", "1")
+        else:
+            values[key] = raw
+    _apply_memory(config.memory, values)
     host = os.environ.get("DEVPILOT_HOST")
     if host is not None:
         config.host = host
@@ -369,7 +421,8 @@ def _apply_env(config: DevPilotConfig) -> None:
             compact_threshold_val = float(compact_threshold)
             if not (0.0 <= compact_threshold_val <= 1.0):
                 raise SystemExit(
-                    f"Config error: DEVPILOT_COMPACT_THRESHOLD must be between 0 and 1, got: {compact_threshold!r}"
+                    "Config error: DEVPILOT_COMPACT_THRESHOLD must be between 0 and 1, "
+                    f"got: {compact_threshold!r}"
                 )
             config.compaction.auto_threshold = compact_threshold_val
         except ValueError:
@@ -384,12 +437,14 @@ def _apply_env(config: DevPilotConfig) -> None:
             compact_tool_limit_val = int(compact_tool_limit)
             if compact_tool_limit_val <= 0:
                 raise SystemExit(
-                    f"Config error: DEVPILOT_COMPACT_TOOL_LIMIT must be a positive integer, got: {compact_tool_limit!r}"
+                    "Config error: DEVPILOT_COMPACT_TOOL_LIMIT must be a positive integer, "
+                    f"got: {compact_tool_limit!r}"
                 )
             config.compaction.tool_result_limit = compact_tool_limit_val
         except ValueError:
             raise SystemExit(
-                f"Config error: DEVPILOT_COMPACT_TOOL_LIMIT must be an integer, got: {compact_tool_limit!r}"
+                "Config error: DEVPILOT_COMPACT_TOOL_LIMIT must be an integer, "
+                f"got: {compact_tool_limit!r}"
             )
 
     compact_tool_keep = os.environ.get("DEVPILOT_COMPACT_TOOL_KEEP")
@@ -398,10 +453,37 @@ def _apply_env(config: DevPilotConfig) -> None:
             compact_tool_keep_val = int(compact_tool_keep)
             if compact_tool_keep_val <= 0:
                 raise SystemExit(
-                    f"Config error: DEVPILOT_COMPACT_TOOL_KEEP must be a positive integer, got: {compact_tool_keep!r}"
+                    "Config error: DEVPILOT_COMPACT_TOOL_KEEP must be a positive integer, "
+                    f"got: {compact_tool_keep!r}"
                 )
             config.compaction.tool_result_keep = compact_tool_keep_val
         except ValueError:
             raise SystemExit(
-                f"Config error: DEVPILOT_COMPACT_TOOL_KEEP must be an integer, got: {compact_tool_keep!r}"
+                "Config error: DEVPILOT_COMPACT_TOOL_KEEP must be an integer, "
+                f"got: {compact_tool_keep!r}"
             )
+
+
+# 校验记忆配置的类型和边界，禁止无界连接池或空用户标识
+def _apply_memory(config: MemoryConfig, data: Any) -> None:
+    if not isinstance(data, dict):
+        raise SystemExit("Config error: [memory] must be a table")
+    allowed = {"dsn", "user_id", "short_term_ttl_hours", "context_max_chars",
+               "pool_max_size", "auto_extract"}
+    if set(data) - allowed:
+        raise SystemExit("Config error: unknown [memory] keys")
+    for key, value in data.items():
+        if key in ("dsn", "user_id"):
+            if not isinstance(value, str) or (key == "user_id" and not value.strip()):
+                raise SystemExit(f"Config error: memory.{key} must be a valid string")
+            if key == "dsn" and value and not value.startswith(("postgresql://", "postgres://")):
+                raise SystemExit("Config error: memory.dsn must be a PostgreSQL URL")
+        elif key == "auto_extract":
+            if not isinstance(value, bool):
+                raise SystemExit("Config error: memory.auto_extract must be boolean")
+        else:
+            maximum = {"pool_max_size": 32, "short_term_ttl_hours": 8760,
+                       "context_max_chars": 64000}[key]
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise SystemExit(f"Config error: memory.{key} must be between 1 and {maximum}")
+        setattr(config, key, value)

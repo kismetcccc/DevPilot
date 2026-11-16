@@ -1,0 +1,49 @@
+name: Checks
+on:
+  push:
+    branches: [main, memory_improve]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests scripts
+      - run: uv run mypy src
+      - run: uv run python scripts/gen_protocol_doc.py --check
+      - run: uv run pytest tests/unit -q
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.14-trixie
+        env:
+          POSTGRES_USER: devpilot
+          POSTGRES_PASSWORD: devpilot_ci
+          POSTGRES_DB: devpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devpilot -d devpilot"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      DEVPILOT_TEST_POSTGRES_DSN: postgresql://devpilot:devpilot_ci@127.0.0.1:5432/devpilot
+      OPENAI_API_KEY: local-test-key
+      OPENAI_BASE_URL: http://127.0.0.1:9
+      DEVPILOT_SESSIONS_DIR: ${{ runner.temp }}/devpilot-sessions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests -m "not integration" -q

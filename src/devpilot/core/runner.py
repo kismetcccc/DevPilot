@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from devpilot.core.bus.events import RunFinishedEvent, RunStartedEvent
+from devpilot.core.bus.events import LogLineEvent, RunFinishedEvent, RunStartedEvent
 from devpilot.core.compact.compactor import Compactor
 from devpilot.core.config import DevPilotConfig
 from devpilot.core.context import ExecutionContext
@@ -17,6 +17,7 @@ from devpilot.core.llm.factory import create_provider
 from devpilot.core.loop import AgentLoop
 from devpilot.core.mcp.server import McpServerManager
 from devpilot.core.memory.loader import load_context_file
+from devpilot.core.memory.service import MemoryService
 from devpilot.core.permissions.manager import PermissionManager
 from devpilot.core.runs import RUNS_DIR, new_run_id
 from devpilot.core.session.model import Session
@@ -64,6 +65,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
+        memory: MemoryService | None = None,
     ) -> None:
         self._config = config
         self._bus = bus
@@ -73,6 +75,7 @@ class AgentRunner:
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
+        self._memory = memory
         # 跨 run 共享的后台 subagent 任务注册表
         self._task_registry = BackgroundTaskRegistry()
 
@@ -108,7 +111,7 @@ class AgentRunner:
             if _ok(t.name):
                 registry.register(t)
         if session is not None and store is not None and run_id is not None:
-            note_tool = NoteSaveTool(store, session.id, run_id)
+            note_tool = NoteSaveTool(store, session.id, run_id, self._memory)
             if _ok(note_tool.name):
                 registry.register(note_tool)
         if provider is not None and bus is not None and run_id is not None:
@@ -149,6 +152,7 @@ class AgentRunner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
+        user_message: str | None = None,
     ) -> RunOutcome:
         run_id = run_id or new_run_id()
         if session is not None and store is not None:
@@ -179,6 +183,7 @@ class AgentRunner:
             global_context=global_ctx,
             project_context=project_ctx,
             system_prompt_override=system_prompt_override,
+            memory_enabled=self._memory is not None,
         )
         prefill_len = len(history)
 
@@ -191,6 +196,46 @@ class AgentRunner:
                 provider: LLMProvider = self._provider or create_provider(
                     self._config.llm.default_model
                 )
+                if self._memory is not None:
+                    memory_sid = session.id if session is not None else run_id
+                    context.session_notes = ""
+                    try:
+                        await self._memory.import_notes(memory_sid, notes)
+                        memory_updates = await self._memory.capture(
+                            user_message if user_message is not None else goal,
+                            memory_sid,
+                            run_id,
+                            provider,
+                        )
+                        context.user_profile, context.session_notes = await self._memory.snapshot(
+                            memory_sid,
+                            run_id,
+                        )
+                        if memory_updates:
+                            await bus.publish(
+                                LogLineEvent(
+                                    run_id=run_id,
+                                    level="INFO",
+                                    source="memory",
+                                    ts=_now(),
+                                    message="画像记录："
+                                    + ", ".join(memory_updates)
+                                    + "；输入 /memory 查看，/memory pending 确认冲突。",
+                                )
+                            )
+                    except Exception:
+                        await bus.publish(
+                            LogLineEvent(
+                                run_id=run_id,
+                                level="WARNING",
+                                source="memory",
+                                message=(
+                                    "PostgreSQL memory unavailable; "
+                                    "continuing without recalled memory"
+                                ),
+                                ts=_now(),
+                            )
+                        )
                 if self._trace is not None:
                     provider = TracingProvider(
                         provider,
@@ -250,7 +295,10 @@ class AgentRunner:
             )
 
         if session is not None and store is not None:
-            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+            if context.history_compacted:
+                store.write_compacted(session.id, context.messages)
+            else:
+                store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
 
         if cancelled:
             raise asyncio.CancelledError()

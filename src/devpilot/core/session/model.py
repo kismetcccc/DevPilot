@@ -16,6 +16,8 @@ class Session:
     created_at: str
     updated_at: str
     run_ids: list[str] = field(default_factory=list)
+    user_id: str = ""
+    project_id: str = ""
 
     # 将 Session 转为可写入 meta.json 的普通 dict
     def to_dict(self) -> dict[str, Any]:
@@ -27,6 +29,8 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "run_ids": list(self.run_ids),
+            "user_id": self.user_id,
+            "project_id": self.project_id,
         }
 
     # 从 meta.json 的 dict 还原 Session 对象
@@ -40,4 +44,6 @@ class Session:
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
             run_ids=[str(x) for x in data.get("run_ids", [])],
+            user_id=str(data.get("user_id", "")),
+            project_id=str(data.get("project_id", "")),
         )

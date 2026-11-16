@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -43,11 +44,16 @@ class SessionManager:
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
         provider: LLMProvider | None = None,
+        *,
+        user_id: str = "",
+        project_id: str = "",
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
         self._provider = provider
+        self._user_id = user_id
+        self._project_id = project_id
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
@@ -64,6 +70,8 @@ class SessionManager:
             created_at=ts,
             updated_at=ts,
             run_ids=[],
+            user_id=self._user_id,
+            project_id=self._project_id,
         )
         self._sessions[sid] = session
         self._locks[sid] = asyncio.Lock()
@@ -128,6 +136,7 @@ class SessionManager:
                 store=self._store,
                 system_prompt_override=system_prompt_override,
                 tool_whitelist=tool_whitelist,
+                user_message=content,
             )
 
             session.updated_at = _now()
@@ -158,6 +167,19 @@ class SessionManager:
             self._store.write_meta(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
 
+    # 用户主动恢复聊天会话，关闭过的会话可重新进入等待输入状态
+    async def resume(self, sid: str) -> Session:
+        session = self._get_session(sid)
+        if self._locks[sid].locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        if session.mode != "chat":
+            raise HandlerError(SESSION_CLOSED, "only chat sessions can be resumed")
+        session.status = "waiting_for_input"
+        session.updated_at = _now()
+        self._store.write_meta(session)
+        await self._bus.publish(SessionResumedEvent(session_id=sid, ts=session.updated_at))
+        return session
+
     # 手动压缩指定 session 的 thread，将摘要持久化写入 thread.jsonl
     async def compact(self, sid: str, focus: str = "") -> Any:
         self._get_session(sid)
@@ -169,16 +191,23 @@ class SessionManager:
         async with lock:
             from devpilot.core.bus.commands import SessionCompactResult
             from devpilot.core.compact.compactor import Compactor
+
             messages = self._store.read_messages(sid)
             session_dir = self._store.session_dir(sid)
             compactor = Compactor(self._bus, session_dir, sid)
             result = await compactor.compact_messages(messages, self._provider, focus=focus)
             if result is None:
                 raise HandlerError(-32021, "compaction failed or not beneficial")
-            self._store.write_compacted(sid, [
-                {"role": "user", "content": result.summary_text},
-                {"role": "assistant", "content": "Understood, I'll continue from this summary."},
-            ])
+            self._store.write_compacted(
+                sid,
+                [
+                    {"role": "user", "content": result.summary_text},
+                    {
+                        "role": "assistant",
+                        "content": "Understood, I'll continue from this summary.",
+                    },
+                ],
+            )
             return SessionCompactResult(
                 summary_tokens=result.summary_tokens,
                 saved_tokens=max(0, result.original_token_estimate - result.summary_tokens),
@@ -193,5 +222,23 @@ class SessionManager:
     def _get_session(self, sid: str) -> Session:
         session = self._sessions.get(sid)
         if session is None:
+            # 会话恢复只能访问合法 ID 对应的既有元数据，禁止任意路径读取
+            if not re.fullmatch(r"sess-[a-f0-9]{12}", sid):
+                raise HandlerError(SESSION_NOT_FOUND, "session not found")
+            try:
+                session = self._store.read_meta(sid)
+            except (OSError, ValueError, KeyError):
+                raise HandlerError(SESSION_NOT_FOUND, "session not found") from None
+            if session.id != sid:
+                raise HandlerError(SESSION_NOT_FOUND, "session not found")
+            self._sessions[sid] = session
+            self._locks[sid] = asyncio.Lock()
+        if (session.user_id and session.user_id != self._user_id) or (
+            session.project_id and session.project_id != self._project_id
+        ):
             raise HandlerError(SESSION_NOT_FOUND, "session not found")
+        if not session.user_id and self._user_id:
+            session.user_id = self._user_id
+            session.project_id = self._project_id
+            self._store.write_meta(session)
         return session

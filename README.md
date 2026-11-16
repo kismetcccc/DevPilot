@@ -123,6 +123,68 @@ uv run devpilot core stop
 
 `core start` 返回进程号后，仍需用 `ping` 确认服务就绪。首次配置或排查启动失败时，使用前台启动方式便于查看错误。
 
+## PostgreSQL 用户画像与短期记忆
+
+设置 `DEVPILOT_MEMORY_DSN` 后，用户画像和新会话笔记写入 PostgreSQL。Core 首次启动会自动创建 `devpilot_memory` schema 和版本表，需要数据库账号具有该数据库的建表权限。未配置 DSN 时继续使用原有文件笔记。
+
+可连接已有 PostgreSQL，也可使用项目提供的 Docker Compose。在本地 `.env` 中配置以下值，密码自行替换；连接 URL 中的特殊字符需要进行 URL 编码：
+
+```dotenv
+DEVPILOT_POSTGRES_PASSWORD=替换为数据库密码
+DEVPILOT_MEMORY_DSN=postgresql://devpilot:替换为数据库密码@127.0.0.1:55432/devpilot
+DEVPILOT_MEMORY_USER_ID=default
+DEVPILOT_MEMORY_TTL_HOURS=24
+DEVPILOT_MEMORY_AUTO_EXTRACT=true
+```
+
+```sh
+docker compose up -d --wait
+uv sync --frozen
+uv run devpilot-core
+# 另一个终端
+uv run devpilot-tui
+```
+
+数据库仅映射本机 `127.0.0.1:55432`，数据保存在 Docker volume 中。更换密码时应同步修改已有数据库角色密码，已有 volume 不会因修改环境变量自动重置密码。`docker compose down` 可停止数据库并保留数据。
+
+记忆分为两层：
+
+- **长期用户画像**：按字段保存语言、称呼、沟通方式、职业和技术偏好，跨会话及项目共享。同一用户在不同项目使用相同 `DEVPILOT_MEMORY_USER_ID`；不同用户使用不同 ID。该 ID 是本地数据分区标识，不是身份认证。
+- **短期记忆**：`note_save` 写入当前用户、项目和会话的笔记，默认 24 小时后不再召回。重复处理同一来源不会延长有效期；新来源可以形成新笔记。“这次用英文”等临时要求只在对应一轮注入，不影响下一轮的默认偏好。
+
+自动画像提取只处理本轮用户原文，不重读助手回答、工具结果或压缩摘要作为证据。明确偏好可建立画像；含糊推断、项目陈述和不明确的冲突保留为候选，重复出现也不会自动转正。明确更正可以更新未锁定字段。每次更新保留来源与版本；字段名使用固定别名映射，语言偏好归一化。当前用户指令始终优先于历史偏好。
+
+TUI 中使用以下命令管理记忆，管理操作不经过模型：
+
+```text
+/memory                              查看正式画像及当前会话 ID
+/memory pending                      查看待确认条目和候选 ID
+/memory confirm <候选ID>              确认候选并更新画像
+/memory set preferred_language 中文    主动设置或重建字段
+/memory history preferred_language    查看变更来源和版本
+/memory lock preferred_language       阻止自动更新，仍可手动编辑
+/memory unlock preferred_language     恢复自动更新
+/memory forget preferred_language     删除字段并阻止旧证据自动恢复
+/memory short                        查看尚未过期的会话记忆
+/memory clear                        清空当前会话记忆
+/resume sess-xxxxxxxxxxxx            恢复之前的聊天会话
+```
+
+删除画像时会清空该字段的候选和历史值，并保留用于防止恢复的指纹与删除记录；手动 `set` 或确认新候选可重新建立。删除画像或清空笔记不等于删除原始聊天记录。旧 `notes.md` 仅幂等导入短期层，旧 `context.md` 继续读取，均不自动转为用户画像。
+
+画像和短期记忆的召回总长度默认限制为 6000 字符，并为短期层预留空间。`DEVPILOT_MEMORY_CONTEXT_MAX_CHARS`、`DEVPILOT_MEMORY_POOL_MAX_SIZE` 可调整长度和连接池上限。Windows 使用线程执行完整数据库事务，兼容现有子进程工具。自动提取每轮最多增加一次模型请求，超时为 15 秒；设 `DEVPILOT_MEMORY_AUTO_EXTRACT=false` 后可仅通过 `/memory` 管理。运行中数据库失联会显示警告并继续主任务，保存失败不会报告为成功。
+
+会话文件仍保存于 `~/.devpilot/sessions`，可通过 `DEVPILOT_SESSIONS_DIR` 指定独立目录。关闭 TUI 后可用 `/resume` 恢复聊天；恢复时会校验用户和项目归属。首次恢复旧版未标记归属的会话时，会将其绑定到当前配置。
+
+真实 PostgreSQL 回归测试使用独立用户命名空间并清理自身数据。PowerShell 中先设置测试数据库连接，再执行：
+
+```powershell
+$env:DEVPILOT_TEST_POSTGRES_DSN = "postgresql://devpilot:替换为数据库密码@127.0.0.1:55432/devpilot"
+uv run pytest tests/unit tests/integration/test_postgres_memory.py tests/integration/test_postgres_daemon.py -v
+```
+
+未设置测试 DSN 时仅跳过 PostgreSQL 测试。Core 进程测试使用本地模型 HTTP 模拟服务，真实运行 PostgreSQL、TCP、会话落盘和重启恢复，不调用外部模型。
+
 ## 配置与日志
 
 配置优先级从低到高为：内置默认值 → `~/.devpilot/config.toml` → 项目 `.devpilot/config.toml` → `.env` → 系统环境变量。设置 `DEVPILOT_CONFIG` 时，只读取它指定的 TOML 文件，再应用环境变量。

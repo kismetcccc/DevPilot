@@ -19,6 +19,8 @@ from devpilot.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    MemoryManageCommand,
+    MemoryManageResult,
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
@@ -30,15 +32,19 @@ from devpilot.core.bus.commands import (
     SessionCreateResult,
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
+    SessionResumeCommand,
+    SessionResumeResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
 )
-from devpilot.core.bus.envelope import EventPushEnvelope
+from devpilot.core.bus.envelope import EventPushEnvelope, HandlerError
 from devpilot.core.config import DevPilotConfig, get_config
 from devpilot.core.events.bus import EventBus
 from devpilot.core.llm.factory import create_provider
 from devpilot.core.logging_setup import setup_logging
 from devpilot.core.mcp.server import McpServerManager
+from devpilot.core.memory.service import MemoryService
+from devpilot.core.memory.store import PostgresMemoryStore
 from devpilot.core.permissions.manager import PermissionManager
 from devpilot.core.permissions.storage import load_policy_file
 from devpilot.core.runner import AgentRunner
@@ -67,6 +73,25 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
+        self._memory: MemoryService | None = None
+        self._memory_store: PostgresMemoryStore | None = None
+
+    # 管理当前配置用户的画像和会话笔记，数据库错误不泄漏连接信息
+    async def _memory_handler(self, params: dict[str, Any]) -> MemoryManageResult:
+        cmd = MemoryManageCommand.model_validate(params)
+        assert self._sessions is not None
+        await self._sessions.get_history(cmd.session_id)
+        if self._memory is None:
+            return MemoryManageResult(enabled=False, action=cmd.action)
+        try:
+            items = await self._memory.manage(
+                cmd.session_id, cmd.action, cmd.key, cmd.value, cmd.candidate_id,
+            )
+        except ValueError as exc:
+            raise HandlerError(-32602, str(exc)) from None
+        except Exception:
+            raise HandlerError(-32030, "PostgreSQL memory is unavailable") from None
+        return MemoryManageResult(enabled=True, action=cmd.action, items=items)
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -112,6 +137,13 @@ class CoreApp:
         cmd = SessionCreateCommand.model_validate(params)
         session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
         return SessionCreateResult(session_id=session.id, status=session.status)
+
+    # 恢复持久化的聊天会话，允许重启后继续读取未过期记忆
+    async def _session_resume_handler(self, params: dict[str, Any]) -> SessionResumeResult:
+        assert self._sessions is not None
+        cmd = SessionResumeCommand.model_validate(params)
+        session = await self._sessions.resume(cmd.session_id)
+        return SessionResumeResult(status=session.status)
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
@@ -178,7 +210,8 @@ class CoreApp:
     ) -> int:
         path = events_file(run_id)
         if not path.exists():
-            for candidate in Path("~/.devpilot/sessions").expanduser().glob(
+            sessions_dir = self._config.sessions_dir if self._config else "~/.devpilot/sessions"
+            for candidate in Path(sessions_dir).expanduser().glob(
                 f"*/runs/{run_id}/events.jsonl"
             ):
                 path = candidate
@@ -205,11 +238,26 @@ class CoreApp:
             await writer.drain()
         return count
 
-    # 启动守护进程：加载配置、初始化日志、启动 trace、启动 TCP 服务器，并等待退出信号
+    # 无论正常退出还是启动失败，都释放记忆数据库连接
     async def run(self) -> None:
+        try:
+            await self._serve()
+        finally:
+            if self._memory_store is not None:
+                await self._memory_store.close()
+
+    # 启动守护进程并初始化 PostgreSQL 记忆、事件服务和 TCP 处理器
+    async def _serve(self) -> None:
         self._start_time = time.monotonic()
         self._config = get_config()
         setup_logging(self._config)
+
+        if self._config.memory.dsn:
+            self._memory_store = PostgresMemoryStore(
+                self._config.memory.dsn, self._config.memory.pool_max_size,
+            )
+            await self._memory_store.open()
+            self._memory = MemoryService(self._memory_store, self._config.memory)
 
         if self._config.trace.enabled:
             trace_path = Path(self._config.trace.file).expanduser()
@@ -230,7 +278,7 @@ class CoreApp:
 
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
-        sessions_root = Path("~/.devpilot/sessions").expanduser()
+        sessions_root = Path(self._config.sessions_dir).expanduser()
         store = SessionStore(sessions_root)
         assert self._config is not None
         compact_provider = create_provider(self._config.llm.default_model)
@@ -248,9 +296,12 @@ class CoreApp:
                 trace=self._trace,
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
+                memory=self._memory,
             ),
             bus=self._bus,
             provider=compact_provider,
+            user_id=self._config.memory.user_id,
+            project_id=str(Path.cwd().resolve()),
         )
 
         server = SocketServer(
@@ -266,8 +317,10 @@ class CoreApp:
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
+        server.register("session.resume", self._session_resume_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("memory.manage", self._memory_handler)
 
         addr = await server.start()
         logger.info("devpilot-core %s listening addr=%s", devpilot.__version__, addr)
